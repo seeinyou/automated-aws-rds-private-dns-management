@@ -1,0 +1,228 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  lambda-calls-phone-api
+
+  The SAM Template for a Lambda function to call a 3rd-party phone call API when a SNS topic is triggered by a CloudWatch alarm.
+
+Parameters:
+  HostedZoneVPCId:
+    Description: The OpenSearch serverless collection name to store CloudWatch logs.
+    Type: String
+    Default: 'vpc-xxxxxxxxxxxx'
+  CustomDNSDomainName:
+    Description: The OpenSearch serverless collection name to store CloudWatch logs.
+    Type: String
+    Default: 'db1-read.example.com'
+  CustomDNSTTL:
+    Description: The OpenSearch serverless collection name to store CloudWatch logs.
+    Type: Number
+    Default: 30
+  CustomDNSDomainValue:
+    Description: The OpenSearch serverless collection name to store CloudWatch logs.
+    Type: String
+    Default: 'aurora-test-1.rds.amazonaws.com'
+
+Globals:
+  Function:
+    Timeout: 3
+
+Resources:
+  # Create a Private Hosted Zone in Route53
+  Route53PrivateHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: myexample.com
+      VPCs: 
+        - VPCId: !Ref HostedZoneVPCId #vpc-092b3ec979c9d3bdf
+          VPCRegion: !Ref 'AWS::Region'
+        # Uncomment lines below to add more VPCs to the Hosted Zone
+        # - VPCId: !HostedZoneVPCId #vpc-092b3ec979c9d3bdf
+        #   VPCRegion: !Ref 'AWS::Region'
+
+
+  # Create a DNS CNAME record to the Hosted Zone for Amazon RDS
+  DNSRecord:
+    Type: AWS::Route53::RecordSet 
+    Properties:
+      HostedZoneId: !Ref Route53PrivateHostedZone
+      Name: !Ref CustomDNSDomainName
+      Type: CNAME
+      TTL: !Ref CustomDNSTTL
+      ResourceRecords:
+        - !Ref CustomDNSDomainValue
+
+
+  # Create the EventBridge rule for receiving RDS events and triggering Lambda function
+  # EventBridgeRuleForRDS1:
+  #   Type: AWS::Events::Rule
+  #   DependsOn: LambdaUpsertDNSUseRDSEventFunction
+  #   Properties:
+  #     EventBusName: default
+  #     EventPattern:
+  #       detail-type:
+  #         - RDS DB Instance Event
+  #         - RDS DB Security Group Event
+  #         - RDS DB Parameter Group Event
+  #         - RDS DB Snapshot Event
+  #         - RDS DB Cluster Event
+  #         - RDS DB Cluster Snapshot Event
+  #       source:
+  #         - aws.rds
+  #       detail:
+  #         EventID:
+  #           - prefix: RDS-EVENT-0071 # The cluster failover complete event
+  #     Name: rds-failover-event-rule
+  #     State: ENABLED
+  #     Targets:
+  #       - Id: lambda-target-1
+  #         Arn: !Ref LambdaUpsertDNSUseRDSEventFunction
+
+
+  # An IAM role for the Lambda function
+  # LambdaExecutionIamRole:
+  #   Type: 'AWS::IAM::Role'
+  #   Properties: 
+  #     AssumeRolePolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service:
+  #               - 'lambda.amazonaws.com'
+  #           Action:
+  #             - 'sts:AssumeRole'
+  #     Description: This role allows a Lambda function to describe-db-instance, update Route53 DNS records, and send logs to CloudWatch and access KMS.
+  #     # ManagedPolicyArns: 
+  #     #   - String
+  #     Path: '/'
+  #     Policies: 
+  #       -
+  #         PolicyName: lambda-uses-cloudwatch-kms
+  #         PolicyDocument: # Plese be aware of that the policies below are for demo purposes. You should enhance security for production.
+  #           Fn::Sub: >
+  #             {
+  #                 "Version": "2012-10-17",
+  #                 "Statement": [
+  #                     {
+  #                         "Effect": "Allow",
+  #                         "Action": "logs:CreateLogGroup",
+  #                         "Resource": "arn:aws:logs:*:${AWS::AccountId}:*"
+  #                     },
+  #                     {
+  #                         "Effect": "Allow",
+  #                         "Action": [
+  #                             "logs:CreateLogStream",
+  #                             "logs:PutLogEvents"
+  #                         ],
+  #                         "Resource": [
+  #                             "arn:aws:logs:*:${AWS::AccountId}:*"
+  #                         ]
+  #                     },
+  #                     {
+  #                       "Effect": "Allow",
+  #                       "Action": [
+  #                           "secretsmanager:GetResourcePolicy",
+  #                           "secretsmanager:GetSecretValue",
+  #                           "secretsmanager:DescribeSecret",
+  #                           "secretsmanager:ListSecretVersionIds"
+  #                       ],
+  #                       "Resource": "arn:aws:secretsmanager:*:${AWS::AccountId}:secret:*"
+  #                   },
+  #                   {
+  #                       "Effect": "Allow",
+  #                       "Action": "secretsmanager:ListSecrets",
+  #                       "Resource": "*"
+  #                   }
+  #                 ]
+  #             }
+  #     # "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/lambda/:*"
+  #     RoleName: 'lambda-execution-role-cloudwatch-kms-1'
+  #     Tags: 
+  #       - Key: 'Author'
+  #         Value: 'JM'
+  #       - Key: 'Creator'
+  #         Value: 'SAM'
+
+  # A Lambda function to pause the Redshift cluster
+  LambdaUpsertDNSUseRDSEventFunction:
+    Type: AWS::Serverless::Function
+    # DependsOn: LambdaExecutionIamRole
+    Properties:
+      CodeUri: src/
+      Handler: rds-dns-management.lambda_handler
+      Runtime: python3.11
+      Tracing: Active
+      # Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/lambda-exec-role-4'
+      # Role: !GetAtt LambdaExecutionIamRole.Arn
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/lambda-exe-rds-event-1'
+      Architectures:
+        - arm64
+      Environment:
+          Variables:
+            notify_url : 'https://api.example.com/phone'
+            token_secret_name: 'demo-3rd-party-api-info-1'
+            receivers: 'username' # Putting the receivers into Amazon Secrets Manager is strongly suggested.
+            max_tries: 3
+            wait_secs: 5
+            template: '9'
+            subject: 'Resource failed'
+            body: 'Resource failed'
+      Events: # Automaticially create an EventBridge rule to the default event bus as the trigger
+        EventBridgeRDSTrigger:
+          Type: CloudWatchEvent 
+          Properties:
+            Pattern:
+              detail-type:
+                - RDS DB Instance Event
+                - RDS DB Security Group Event
+                - RDS DB Parameter Group Event
+                - RDS DB Snapshot Event
+                - RDS DB Cluster Event
+                - RDS DB Cluster Snapshot Event
+              source:
+                - aws.rds
+              detail:
+                EventID:
+                  - prefix: RDS-EVENT-0071 # The cluster failover complete event
+          # Name: rds-failover-event-rule
+
+
+  # The IAM inline policy for using KMS
+  # LambdaIamPolicyForKMS:
+  #   Type: AWS::IAM::Policy
+  #   Properties: 
+  #     Groups: 
+  #       - String
+  #     PolicyDocument:
+  #       Fn:Sub: >
+  #         {
+  #           "Version":"2012-10-17",
+  #           "Statement":[
+  #             {
+  #               "Effect":"Allow",
+  #               "Action":"kms:Decrypt",
+  #               "Resource":${LambdaSensitiveInfoKey},
+  #               "Condition":{
+  #                 "StringEquals":{
+  #                   "kms:EncryptionContext:LambdaFunctionName":"${SendPhoneCallNotificationFunction}"
+  #                 }
+  #               }
+  #             }
+  #           ]
+  #         }
+  #     PolicyName: String
+  #     Roles: 
+  #       - String
+  #     Users: 
+  #       - String
+
+
+# Outputs:
+#   # The SNS topic
+#   CloudWatchAlarmSnsTopic:
+#     Description: "The Amazon SNS topic to receive CloudWatch alarm and trigger Lambda functions."
+#     Value: !Ref SnsTopicForCloudWatchAlarm
+#   PhoneCallFunction:
+#     Description: "The Lambda function ARN"
+#     Value: !GetAtt SendPhoneCallNotificationFunction.Arn
